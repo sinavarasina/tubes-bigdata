@@ -1,0 +1,77 @@
+FROM debian:trixie-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ==========================================
+# 1. SETUP BUILD TOOLS
+# ==========================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    pkg-config \
+    libssl-dev \
+    ca-certificates \
+    curl \
+    wget \
+    git \
+    nano \
+    unzip \
+    ripgrep \
+    btop \
+    nodejs \
+    npm \
+    neovim \
+    && rm -rf /var/lib/apt/lists/*
+
+# ==========================================
+# 2. SETUP JAVA 21 
+# ==========================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openjdk-21-jdk-headless \
+    && rm -rf /var/lib/apt/lists/*
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+
+# ==========================================
+# 3. SETUP PYTHON & LIBRARIES BIG DATA 
+# ==========================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir --break-system-packages \
+    pyspark \
+    pandas \
+    numpy \
+    kafka-python \
+    polars \
+    pyarrow
+
+# ==========================================
+# 4. SETUP RUST 
+# ==========================================
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+
+# ==========================================
+# 5. SETUP FASTFETCH & AKUMAVIM
+# ==========================================
+# Install Fastfetch (for flexing)
+RUN curl -L https://github.com/fastfetch-cli/fastfetch/releases/latest/download/fastfetch-linux-amd64.deb -o fastfetch.deb && \
+    dpkg -i fastfetch.deb && \
+    rm fastfetch.deb || apt-get install -f -y
+
+# Setup Akumavim (my preferable editor)
+RUN mkdir -p /root/.config && \
+    git clone https://github.com/sinavarasina/akumavim /root/.config/nvim
+
+# ==========================================
+# 6. SETUP WORKSPACE
+# ==========================================
+WORKDIR /workspace
+
+CMD ["tail", "-f", "/dev/null"]
