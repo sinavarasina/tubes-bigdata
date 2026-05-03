@@ -31,6 +31,10 @@ services:
     network_mode: "host"
     depends_on:
       - kafka
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+      - KAFKA_TOPIC=student-data-rust
+      - KAFKA_GROUP_ID=dropout-consumer-rust
     volumes:
       - ./case_1:/workspace/case_1
       - ./case_2:/workspace/case_2
@@ -38,6 +42,8 @@ services:
       - ./logs:/workspace/logs
       - cargo-registry:/root/.cargo/registry
       - cargo-git:/root/.cargo/git
+      - ./scripts:/workspace/scripts
+      - ./Makefile:/workspace/Makefile
     command: tail -f /dev/null
 
 volumes:

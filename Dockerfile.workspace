@@ -10,6 +10,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     pkg-config \
     libssl-dev \
+    libfontconfig1-dev \
+    libfreetype6-dev \
+    libcurl4-openssl-dev \
+    libsasl2-dev \
+    libzstd-dev \
+    zlib1g-dev \
+    libopenblas-dev \
     ca-certificates \
     curl \
     wget \
@@ -46,7 +53,9 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     numpy \
     kafka-python \
     polars \
-    pyarrow
+    pyarrow \
+    matplotlib \
+    seaborn
 
 # ==========================================
 # 4. SETUP RUST 
