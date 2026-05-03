@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use dropout_bigdata_pipeline_rust::StudentRecord;
-use hdrhistogram::Histogram;
 use polars::prelude::*;
 use rdkafka::{
     config::ClientConfig,
@@ -15,6 +14,8 @@ use std::{
 use tokio::time::timeout;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+
+// ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
 #[command(name = "consumer")]
@@ -35,17 +36,27 @@ struct Cli {
         default_value = "../../data/preprocessed"
     )]
     output: PathBuf,
-    #[arg(long, default_value_t = 5000)]
+    #[arg(long, default_value_t = 5_000)]
     batch_size: usize,
     #[arg(long, default_value_t = 10)]
     idle_timeout: u64,
 }
+
+// ── Loop control ──────────────────────────────────────────────────────────────
+
+enum LoopAction {
+    Continue,
+    FlushAndStop,
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
         .init();
+
     let cli = Cli::parse();
     std::fs::create_dir_all(&cli.output)?;
 
@@ -57,63 +68,68 @@ async fn main() -> Result<()> {
         .context("Failed to create Kafka consumer")?;
 
     consumer
-        .subscribe(&[&cli.topic])
+        .subscribe(&[cli.topic.as_str()])
         .context("Failed to subscribe to topic")?;
 
-    let mut batch = Vec::with_capacity(cli.batch_size);
-    let mut batch_idx = 0usize;
-    let mut total_recv = 0u64;
-    let mut lat_hist = Histogram::<u64>::new(3).unwrap();
+    let mut batch: Vec<StudentRecord> = Vec::with_capacity(cli.batch_size);
+    let mut batch_idx: usize = 0;
+    let mut total_recv: u64 = 0;
     let start = Instant::now();
+    let idle = Duration::from_secs(cli.idle_timeout);
 
-    info!("Waiting for data from topic: {}", cli.topic);
+    info!("Waiting for data on topic: {}", cli.topic);
 
     loop {
-        let msg_result = timeout(Duration::from_secs(cli.idle_timeout), consumer.recv()).await;
-        match msg_result {
-            Err(_) => {
-                if !batch.is_empty() {
-                    flush_batch(&batch, &cli.output, batch_idx).await?;
-                    batch.clear();
-                }
-                info!("Idle timeout reached. Finished pulling data.");
-                break;
+        let action = match timeout(idle, consumer.recv()).await {
+            Err(_elapsed) => LoopAction::FlushAndStop,
+            Ok(Err(e)) => {
+                warn!("Kafka error: {e}");
+                LoopAction::Continue
             }
             Ok(Ok(msg)) => {
-                let t_recv = Instant::now();
-                total_recv += 1;
-
                 if let Some(payload) = msg.payload() {
                     if let Ok(rec) = serde_json::from_slice::<StudentRecord>(payload) {
+                        total_recv += 1;
                         batch.push(rec);
-                        lat_hist
-                            .record(t_recv.elapsed().as_micros() as u64)
-                            .unwrap_or(());
                     }
                 }
-
-                if batch.len() >= cli.batch_size {
-                    flush_batch(&batch, &cli.output, batch_idx).await?;
-                    batch.clear();
-                    batch_idx += 1;
-                }
+                LoopAction::Continue
             }
-            Ok(Err(e)) => warn!("Kafka error: {}", e),
+        };
+
+        // Flush when the batch is full.
+        if batch.len() >= cli.batch_size {
+            flush_batch(&batch, &cli.output, batch_idx).await?;
+            batch.clear();
+            batch_idx += 1;
+        }
+
+        match action {
+            LoopAction::Continue => {}
+            LoopAction::FlushAndStop => {
+                if !batch.is_empty() {
+                    flush_batch(&batch, &cli.output, batch_idx).await?;
+                }
+                info!("Idle timeout reached — stopping.");
+                break;
+            }
         }
     }
 
     println!("\n=== RUST CONSUMER FINISHED ===");
     println!(
-        "Total Received: {} | Time: {:.2} seconds",
+        "Total received: {} | Time: {:.2} s",
         total_recv,
-        start.elapsed().as_secs_f64()
+        start.elapsed().as_secs_f64(),
     );
     Ok(())
 }
 
-async fn flush_batch(batch: &[StudentRecord], output: &PathBuf, batch_idx: usize) -> Result<()> {
+// ── Batch flushing ────────────────────────────────────────────────────────────
+
+async fn flush_batch(batch: &[StudentRecord], output: &PathBuf, idx: usize) -> Result<()> {
     let mut df = records_to_dataframe(batch)?;
-    let path = output.join(format!("batch_{:04}.parquet", batch_idx));
+    let path = output.join(format!("batch_{idx:04}.parquet"));
     let mut file = std::fs::File::create(&path)?;
 
     ParquetWriter::new(&mut file)
@@ -124,52 +140,72 @@ async fn flush_batch(batch: &[StudentRecord], output: &PathBuf, batch_idx: usize
     Ok(())
 }
 
+// ── DataFrame builder ─────────────────────────────────────────────────────────
+
 fn records_to_dataframe(records: &[StudentRecord]) -> Result<DataFrame> {
+    // Collect each column once to avoid repeated iteration.
+    macro_rules! col_i32 {
+        ($field:ident) => {
+            records.iter().map(|r| r.$field).collect::<Vec<i32>>()
+        };
+    }
+    macro_rules! col_f64 {
+        ($field:ident) => {
+            records.iter().map(|r| r.$field).collect::<Vec<f64>>()
+        };
+    }
+    macro_rules! col_computed {
+        ($method:ident, $ty:ty) => {
+            records.iter().map(|r| r.$method()).collect::<Vec<$ty>>()
+        };
+    }
+
     let df = df!(
-        "marital_status" => records.iter().map(|r| r.marital_status).collect::<Vec<i32>>(),
-        "gender" => records.iter().map(|r| r.gender).collect::<Vec<i32>>(),
-        "age_at_enrollment" => records.iter().map(|r| r.age_at_enrollment).collect::<Vec<i32>>(),
-        "international" => records.iter().map(|r| r.international).collect::<Vec<i32>>(),
-        "displaced" => records.iter().map(|r| r.displaced).collect::<Vec<i32>>(),
-        "educational_special_needs" => records.iter().map(|r| r.educational_special_needs).collect::<Vec<i32>>(),
-        "nacionality" => records.iter().map(|r| r.nacionality).collect::<Vec<i32>>(),
-        "mothers_qualification" => records.iter().map(|r| r.mothers_qualification).collect::<Vec<i32>>(),
-        "fathers_qualification" => records.iter().map(|r| r.fathers_qualification).collect::<Vec<i32>>(),
-        "mothers_occupation" => records.iter().map(|r| r.mothers_occupation).collect::<Vec<i32>>(),
-        "fathers_occupation" => records.iter().map(|r| r.fathers_occupation).collect::<Vec<i32>>(),
-        "scholarship_holder" => records.iter().map(|r| r.scholarship_holder).collect::<Vec<i32>>(),
-        "debtor" => records.iter().map(|r| r.debtor).collect::<Vec<i32>>(),
-        "tuition_fees_up_to_date" => records.iter().map(|r| r.tuition_fees_up_to_date).collect::<Vec<i32>>(),
-        "application_mode" => records.iter().map(|r| r.application_mode).collect::<Vec<i32>>(),
-        "application_order" => records.iter().map(|r| r.application_order).collect::<Vec<i32>>(),
-        "course" => records.iter().map(|r| r.course).collect::<Vec<i32>>(),
-        "daytime_evening_attendance" => records.iter().map(|r| r.daytime_evening_attendance).collect::<Vec<i32>>(),
-        "previous_qualification" => records.iter().map(|r| r.previous_qualification).collect::<Vec<i32>>(),
-        "previous_qualification_grade" => records.iter().map(|r| r.previous_qualification_grade).collect::<Vec<f64>>(),
-        "admission_grade" => records.iter().map(|r| r.admission_grade).collect::<Vec<f64>>(),
-        "curricular_units_1st_sem_credited" => records.iter().map(|r| r.curricular_units_1st_sem_credited).collect::<Vec<i32>>(),
-        "curricular_units_1st_sem_enrolled" => records.iter().map(|r| r.curricular_units_1st_sem_enrolled).collect::<Vec<i32>>(),
-        "curricular_units_1st_sem_evaluations" => records.iter().map(|r| r.curricular_units_1st_sem_evaluations).collect::<Vec<i32>>(),
-        "curricular_units_1st_sem_approved" => records.iter().map(|r| r.curricular_units_1st_sem_approved).collect::<Vec<i32>>(),
-        "curricular_units_1st_sem_grade" => records.iter().map(|r| r.curricular_units_1st_sem_grade).collect::<Vec<f64>>(),
-        "curricular_units_1st_sem_without_evaluations" => records.iter().map(|r| r.curricular_units_1st_sem_without_evaluations).collect::<Vec<i32>>(),
-        "curricular_units_2nd_sem_credited" => records.iter().map(|r| r.curricular_units_2nd_sem_credited).collect::<Vec<i32>>(),
-        "curricular_units_2nd_sem_enrolled" => records.iter().map(|r| r.curricular_units_2nd_sem_enrolled).collect::<Vec<i32>>(),
-        "curricular_units_2nd_sem_evaluations" => records.iter().map(|r| r.curricular_units_2nd_sem_evaluations).collect::<Vec<i32>>(),
-        "curricular_units_2nd_sem_approved" => records.iter().map(|r| r.curricular_units_2nd_sem_approved).collect::<Vec<i32>>(),
-        "curricular_units_2nd_sem_grade" => records.iter().map(|r| r.curricular_units_2nd_sem_grade).collect::<Vec<f64>>(),
-        "curricular_units_2nd_sem_without_evaluations" => records.iter().map(|r| r.curricular_units_2nd_sem_without_evaluations).collect::<Vec<i32>>(),
-        "unemployment_rate" => records.iter().map(|r| r.unemployment_rate).collect::<Vec<f64>>(),
-        "inflation_rate" => records.iter().map(|r| r.inflation_rate).collect::<Vec<f64>>(),
-        "gdp" => records.iter().map(|r| r.gdp).collect::<Vec<f64>>(),
-        "pass_rate_1st_sem" => records.iter().map(|r| r.pass_rate_1st()).collect::<Vec<f64>>(),
-        "pass_rate_2nd_sem" => records.iter().map(|r| r.pass_rate_2nd()).collect::<Vec<f64>>(),
-        "grade_delta" => records.iter().map(|r| r.grade_delta()).collect::<Vec<f64>>(),
-        "financial_stability_index" => records.iter().map(|r| r.financial_stability_index()).collect::<Vec<f64>>(),
-        "target" => records.iter().map(|r| r.target.clone()).collect::<Vec<String>>(),
-        "label" => records.iter().map(|r| r.label().unwrap_or(-1)).collect::<Vec<i32>>(),
-        "event_ts_ms" => records.iter().map(|r| r.event_ts_ms).collect::<Vec<u64>>(),
-    ).context("Failed to build Parquet DataFrame")?;
+        "marital_status"                              => col_i32!(marital_status),
+        "gender"                                      => col_i32!(gender),
+        "age_at_enrollment"                           => col_i32!(age_at_enrollment),
+        "international"                               => col_i32!(international),
+        "displaced"                                   => col_i32!(displaced),
+        "educational_special_needs"                   => col_i32!(educational_special_needs),
+        "nacionality"                                 => col_i32!(nacionality),
+        "mothers_qualification"                       => col_i32!(mothers_qualification),
+        "fathers_qualification"                       => col_i32!(fathers_qualification),
+        "mothers_occupation"                          => col_i32!(mothers_occupation),
+        "fathers_occupation"                          => col_i32!(fathers_occupation),
+        "scholarship_holder"                          => col_i32!(scholarship_holder),
+        "debtor"                                      => col_i32!(debtor),
+        "tuition_fees_up_to_date"                     => col_i32!(tuition_fees_up_to_date),
+        "application_mode"                            => col_i32!(application_mode),
+        "application_order"                           => col_i32!(application_order),
+        "course"                                      => col_i32!(course),
+        "daytime_evening_attendance"                  => col_i32!(daytime_evening_attendance),
+        "previous_qualification"                      => col_i32!(previous_qualification),
+        "previous_qualification_grade"                => col_f64!(previous_qualification_grade),
+        "admission_grade"                             => col_f64!(admission_grade),
+        "curricular_units_1st_sem_credited"           => col_i32!(curricular_units_1st_sem_credited),
+        "curricular_units_1st_sem_enrolled"           => col_i32!(curricular_units_1st_sem_enrolled),
+        "curricular_units_1st_sem_evaluations"        => col_i32!(curricular_units_1st_sem_evaluations),
+        "curricular_units_1st_sem_approved"           => col_i32!(curricular_units_1st_sem_approved),
+        "curricular_units_1st_sem_grade"              => col_f64!(curricular_units_1st_sem_grade),
+        "curricular_units_1st_sem_without_evaluations"=> col_i32!(curricular_units_1st_sem_without_evaluations),
+        "curricular_units_2nd_sem_credited"           => col_i32!(curricular_units_2nd_sem_credited),
+        "curricular_units_2nd_sem_enrolled"           => col_i32!(curricular_units_2nd_sem_enrolled),
+        "curricular_units_2nd_sem_evaluations"        => col_i32!(curricular_units_2nd_sem_evaluations),
+        "curricular_units_2nd_sem_approved"           => col_i32!(curricular_units_2nd_sem_approved),
+        "curricular_units_2nd_sem_grade"              => col_f64!(curricular_units_2nd_sem_grade),
+        "curricular_units_2nd_sem_without_evaluations"=> col_i32!(curricular_units_2nd_sem_without_evaluations),
+        "unemployment_rate"                           => col_f64!(unemployment_rate),
+        "inflation_rate"                              => col_f64!(inflation_rate),
+        "gdp"                                         => col_f64!(gdp),
+        "pass_rate_1st_sem"                           => col_computed!(pass_rate_1st, f64),
+        "pass_rate_2nd_sem"                           => col_computed!(pass_rate_2nd, f64),
+        "grade_delta"                                 => col_computed!(grade_delta, f64),
+        "financial_stability_index"                   => col_computed!(financial_stability_index, f64),
+        "target"                                      => records.iter().map(|r| r.target.clone()).collect::<Vec<String>>(),
+        "label"                                       => records.iter().map(|r| r.label_i32()).collect::<Vec<i32>>(),
+        "event_ts_ms"                                 => records.iter().map(|r| r.event_ts_ms).collect::<Vec<u64>>(),
+    )
+    .context("Failed to build Parquet DataFrame")?;
 
     Ok(df)
 }

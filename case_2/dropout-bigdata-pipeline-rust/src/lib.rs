@@ -1,4 +1,48 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
+
+// ── Error type ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, thiserror::Error)]
+pub enum RecordError {
+    #[error("unknown target label: {0:?}")]
+    UnknownTarget(String),
+}
+
+// ── Domain model ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(i32)]
+pub enum Label {
+    Dropout = 0,
+    Enrolled = 1,
+    Graduate = 2,
+}
+
+impl fmt::Display for Label {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Label::Dropout => write!(f, "Dropout"),
+            Label::Enrolled => write!(f, "Enrolled"),
+            Label::Graduate => write!(f, "Graduate"),
+        }
+    }
+}
+
+impl TryFrom<&str> for Label {
+    type Error = RecordError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "Dropout" => Ok(Label::Dropout),
+            "Enrolled" => Ok(Label::Enrolled),
+            "Graduate" => Ok(Label::Graduate),
+            other => Err(RecordError::UnknownTarget(other.to_owned())),
+        }
+    }
+}
+
+// ── StudentRecord ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StudentRecord {
@@ -46,47 +90,56 @@ pub struct StudentRecord {
 }
 
 impl StudentRecord {
+    // ── Computed features ───────────────────────────────────────────────────
+
     pub fn pass_rate_1st(&self) -> f64 {
-        if self.curricular_units_1st_sem_enrolled > 0 {
-            self.curricular_units_1st_sem_approved as f64
-                / self.curricular_units_1st_sem_enrolled as f64
-        } else {
-            0.0
-        }
+        safe_ratio(
+            self.curricular_units_1st_sem_approved,
+            self.curricular_units_1st_sem_enrolled,
+        )
     }
 
     pub fn pass_rate_2nd(&self) -> f64 {
-        if self.curricular_units_2nd_sem_enrolled > 0 {
-            self.curricular_units_2nd_sem_approved as f64
-                / self.curricular_units_2nd_sem_enrolled as f64
-        } else {
-            0.0
-        }
+        safe_ratio(
+            self.curricular_units_2nd_sem_approved,
+            self.curricular_units_2nd_sem_enrolled,
+        )
     }
 
+    /// Grade improvement (positive = improving, negative = declining).
     pub fn grade_delta(&self) -> f64 {
         self.curricular_units_2nd_sem_grade - self.curricular_units_1st_sem_grade
     }
 
+    /// Simple proxy: 1 point per paid tuition / scholarship, −1 per debt.
     pub fn financial_stability_index(&self) -> f64 {
-        self.tuition_fees_up_to_date as f64 + self.scholarship_holder as f64 - self.debtor as f64
+        f64::from(self.tuition_fees_up_to_date) + f64::from(self.scholarship_holder)
+            - f64::from(self.debtor)
     }
 
-    pub fn label(&self) -> Option<i32> {
-        match self.target.as_str() {
-            "Dropout" => Some(0),
-            "Enrolled" => Some(1),
-            "Graduate" => Some(2),
-            _ => None,
-        }
+    // ── Label helpers ───────────────────────────────────────────────────────
+
+    /// Infallible label; returns `None` when the target string is unknown.
+    pub fn label(&self) -> Option<Label> {
+        Label::try_from(self.target.as_str()).ok()
     }
+
+    /// Returns the numeric (`i32`) representation expected by the Parquet schema.
+    pub fn label_i32(&self) -> i32 {
+        self.label().map(|l| l as i32).unwrap_or(-1)
+    }
+
+    // ── Validation ──────────────────────────────────────────────────────────
 
     pub fn is_valid(&self) -> bool {
-        (17..=70).contains(&self.age_at_enrollment)
+        const AGE_RANGE: std::ops::RangeInclusive<i32> = 17..=70;
+        AGE_RANGE.contains(&self.age_at_enrollment)
             && self.curricular_units_1st_sem_grade >= 0.0
             && self.curricular_units_2nd_sem_grade >= 0.0
     }
 }
+
+// ── Kafka config ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct KafkaConfig {
@@ -103,5 +156,17 @@ impl Default for KafkaConfig {
             topic: "student-data-rust".into(),
             group_id: "dropout-consumer-rust".into(),
         }
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Returns `approved / enrolled`, or 0 when `enrolled == 0`.
+#[inline]
+fn safe_ratio(approved: i32, enrolled: i32) -> f64 {
+    if enrolled > 0 {
+        f64::from(approved) / f64::from(enrolled)
+    } else {
+        0.0
     }
 }

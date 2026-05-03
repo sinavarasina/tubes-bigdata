@@ -1,75 +1,102 @@
 use plotters::prelude::*;
 use serde_json::Value;
-use std::collections::HashMap;
-use std::env;
-use std::error::Error;
-use std::fs;
+use std::{collections::HashMap, env, error::Error, fs, path::Path};
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/// One data point to plot, derived from the latest JSON log for each target rate.
+#[derive(Debug)]
+struct DataPoint {
+    label: String,
+    actual_rate: f64,
+}
+
+impl DataPoint {
+    fn from_json(json: &Value) -> Option<Self> {
+        let target_rate = json["target_rate"].as_u64()?;
+        let actual_rate = json["avg_rate"].as_f64()?;
+        let label = if target_rate == 0 {
+            "Burst Mode".to_owned()
+        } else {
+            format!("{target_rate} rec/s")
+        };
+        Some(DataPoint { label, actual_rate })
+    }
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let log_dir = env::var("LOG_DIR").unwrap_or_else(|_| "../../logs".to_string());
-    let out_file_name = format!("{}/throughput_benchmark.svg", log_dir);
+    let log_dir = env::var("LOG_DIR").unwrap_or_else(|_| "../../logs".to_owned());
+    let out_path = format!("{log_dir}/throughput_benchmark.svg");
 
-    let mut latest_data: HashMap<u64, (String, f64, u64)> = HashMap::new();
+    let mut data = load_data(&log_dir);
 
-    if let Ok(entries) = fs::read_dir(&log_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
-                let file_name = path.file_name().unwrap().to_string_lossy();
+    if data.is_empty() {
+        eprintln!("No valid JSON log files found in {log_dir}. Visualizer will use fallback data.");
+        data.push(DataPoint {
+            label: "No Data".to_owned(),
+            actual_rate: 0.0,
+        });
+    } else {
+        data.sort_by(|a, b| a.actual_rate.partial_cmp(&b.actual_rate).unwrap());
+    }
 
-                if file_name.starts_with("producer_rust") {
-                    let ts_str = file_name
-                        .trim_end_matches(".json")
-                        .split('_')
-                        .last()
-                        .unwrap_or("0");
-                    let timestamp: u64 = ts_str.parse().unwrap_or(0);
+    render_chart(&data, &out_path)?;
+    println!("SVG chart written to {out_path}");
+    Ok(())
+}
 
-                    let content = fs::read_to_string(&path)?;
-                    if let Ok(json) = serde_json::from_str::<Value>(&content) {
-                        let target_rate = json["target_rate"].as_u64().unwrap_or(0);
-                        let avg_rate = json["avg_rate"].as_f64().unwrap_or(0.0);
+// ── Data loading ──────────────────────────────────────────────────────────────
 
-                        let label = if target_rate == 0 {
-                            "Burst Mode".to_string()
-                        } else {
-                            format!("{} rec/s", target_rate)
-                        };
+/// Reads all `producer_rust*.json` files and returns the **latest** entry per
+/// target rate, deduplicated by timestamp.
+fn load_data(log_dir: &str) -> Vec<DataPoint> {
+    // key = target_rate, value = (DataPoint, timestamp)
+    let mut latest: HashMap<u64, (DataPoint, u64)> = HashMap::new();
 
-                        let entry = latest_data.entry(target_rate).or_insert((
-                            label.clone(),
-                            avg_rate,
-                            timestamp,
-                        ));
-                        if timestamp > entry.2 {
-                            *entry = (label, avg_rate, timestamp);
-                        }
-                    }
-                }
-            }
+    let entries = match fs::read_dir(log_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    for path in entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| is_rust_producer_json(p))
+    {
+        let Some(ts) = parse_timestamp(&path) else {
+            continue;
+        };
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<Value>(&content) else {
+            continue;
+        };
+        let Some(point) = DataPoint::from_json(&json) else {
+            continue;
+        };
+
+        let target_rate = json["target_rate"].as_u64().unwrap_or(0);
+        let entry = latest.entry(target_rate).or_insert_with(|| (point, ts));
+        if ts > entry.1 {
+            *entry = (DataPoint::from_json(&json).expect("already validated"), ts);
         }
     }
 
-    let mut data_points: Vec<(String, f64)> = latest_data
-        .values()
-        .map(|(l, v, _)| (l.clone(), *v))
-        .collect();
+    latest.into_values().map(|(dp, _)| dp).collect()
+}
 
-    if data_points.is_empty() {
-        println!(
-            "No valid JSON log files found in {}. Visualizer will use fallback data.",
-            log_dir
-        );
-        data_points = vec![("No Data".to_string(), 0.0)];
-    } else {
-        data_points.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-    }
+// ── Chart rendering ───────────────────────────────────────────────────────────
 
-    let labels: Vec<String> = data_points.iter().map(|(l, _)| l.clone()).collect();
-    let values: Vec<i32> = data_points.iter().map(|(_, v)| *v as i32).collect();
-    let max_val = values.iter().max().unwrap_or(&1000) + 500;
+fn render_chart(data: &[DataPoint], out_path: &str) -> Result<(), Box<dyn Error>> {
+    let labels: Vec<&str> = data.iter().map(|d| d.label.as_str()).collect();
+    let values: Vec<i32> = data.iter().map(|d| d.actual_rate as i32).collect();
+    let max_val = values.iter().copied().max().unwrap_or(1000) + 500;
+    let max_value = values.iter().copied().max().unwrap_or(0);
 
-    let root = SVGBackend::new(&out_file_name, (800, 600)).into_drawing_area();
+    let root = SVGBackend::new(out_path, (800, 600)).into_drawing_area();
     root.fill(&WHITE)?;
 
     let mut chart = ChartBuilder::on(&root)
@@ -90,33 +117,46 @@ fn main() -> Result<(), Box<dyn Error>> {
         .x_labels(labels.len())
         .x_label_formatter(&|x| match x {
             SegmentValue::Exact(i) | SegmentValue::CenterOf(i) => {
-                if *i < labels.len() {
-                    labels[*i].to_string()
-                } else {
-                    String::new()
-                }
+                labels.get(*i).copied().unwrap_or("").to_owned()
             }
             _ => String::new(),
         })
         .draw()?;
 
     chart.draw_series(values.iter().enumerate().map(|(i, &val)| {
-        let x0 = SegmentValue::Exact(i);
-        let x1 = SegmentValue::Exact(i + 1);
-
-        let color = if val == *values.iter().max().unwrap_or(&0) {
+        let color = if val == max_value {
             RED.filled()
         } else {
             BLUE.filled()
         };
-
-        let mut bar = Rectangle::new([(x0, 0), (x1, val)], color);
+        let mut bar = Rectangle::new(
+            [
+                (SegmentValue::Exact(i), 0),
+                (SegmentValue::Exact(i + 1), val),
+            ],
+            color,
+        );
         bar.set_margin(0, 0, 20, 20);
         bar
     }))?;
 
     root.present()?;
-    println!("SVG chart generated at {}", out_file_name);
-
     Ok(())
+}
+
+// ── Path helpers ──────────────────────────────────────────────────────────────
+
+fn is_rust_producer_json(path: &Path) -> bool {
+    path.is_file()
+        && path.extension().and_then(|e| e.to_str()) == Some("json")
+        && path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("producer_rust"))
+}
+
+/// Extracts the trailing `_<timestamp>` from a file stem like
+/// `producer_rust_rate100_scale1_1700000000`.
+fn parse_timestamp(path: &Path) -> Option<u64> {
+    path.file_stem()?.to_str()?.rsplit('_').next()?.parse().ok()
 }
