@@ -13,7 +13,9 @@ export PARQUET_OUT_DIR         := $(WORKSPACE_DIR)/data/preprocessed
 export LOG_DIR                 := $(WORKSPACE_DIR)/logs
 export TABLEAU_DIR             := $(WORKSPACE_DIR)/data/tableau_exports
 
+export IDLE_TIMEOUT            ?= 5
 export RATE                    ?= 0
+export SCALE                   ?= 1
 export RANDOM_SEED             ?= 42
 export N_RUNS                  ?= 3
 export KAFKA_BOOTSTRAP_SERVERS := 127.0.0.1:9092
@@ -54,10 +56,10 @@ run-case1: prepare-data
 
 run-case2: prepare-data build-case2
 	@echo "\n=== CASE 2: Rust + PySpark Pipeline ==="
-	@echo "[1] Starting Consumer (background) & Producer (Rate: $(RATE))..."
-	cd $(CASE2_RUST_DIR) && ./target/release/consumer & \
+	@echo "[1] Starting Consumer (background) & Producer (Rate: $(RATE), Scale: $(SCALE)x)..."
+	cd $(CASE2_RUST_DIR) && ./target/release/consumer --idle-timeout $(IDLE_TIMEOUT) & \
 	sleep 2 && \
-	cd $(CASE2_RUST_DIR) && ./target/release/producer --rate $(RATE) && \
+	cd $(CASE2_RUST_DIR) && ./target/release/producer --rate $(RATE) --iterations $(SCALE) && \
 	wait
 	@echo "[2] Training PySpark MLlib..."
 	cd $(CASE2_PY_DIR) && python3 spark_training_parquet.py
@@ -76,7 +78,7 @@ benchmark: prepare-data build-case2
 	# @for i in $$(seq 1 $(N_RUNS)); do \
 	# 	echo "\n--- Python Run $$i/$(N_RUNS) ---"; \
 	# 	rm -rf $(PARQUET_OUT_DIR)/*; \
-	# 	cd $(CASE1_DIR) && python3 scripts/02_kafka_consumer_processing.py --idle-timeout 5 & \
+	# 	cd $(CASE1_DIR) && python3 scripts/02_kafka_consumer_processing.py --idle-timeout $(IDLE_TIMEOUT) & \
 	# 	sleep 2 && \
 	# 	cd $(CASE1_DIR) && python3 scripts/01_kafka_producer.py --rate $(RATE) && \
 	# 	wait; \
@@ -88,7 +90,7 @@ benchmark: prepare-data build-case2
 		echo "\n--- Rust Run $$i/$(N_RUNS) ---"; \
 		rm -rf $(PARQUET_OUT_DIR)/*; \
 		GROUP_ID=bench-$$i-$$(date +%s); \
-		cd $(CASE2_RUST_DIR) && ./target/release/consumer --group-id $$GROUP_ID --idle-timeout 7 & \
+		cd $(CASE2_RUST_DIR) && ./target/release/consumer --group-id $$GROUP_ID --idle-timeout $(IDLE_TIMEOUT) & \
 		sleep 4 && \
 		cd $(CASE2_RUST_DIR) && ./target/release/producer --rate $(RATE) && \
 		wait; \
@@ -97,6 +99,37 @@ benchmark: prepare-data build-case2
 
 	@echo "\n[Phase 3/3: Statistical Calculation & Reporting]"
 	python3 scripts/benchmark_comparative.py --idle-timeout 5
+
+case-2-eval-scalability: prepare-data build-case2
+	@echo "\n======================================================="
+	@echo " STARTING END-TO-END SCALABILITY EVALUATION"
+	@echo "======================================================="
+	
+	@echo "\n>>> [SCALE 1x] ~4,424 Records <<<"
+	rm -rf $(PARQUET_OUT_DIR)/*
+	cd $(CASE2_RUST_DIR) && ./target/release/consumer --idle-timeout $(IDLE_TIMEOUT) & \
+	sleep 2 && \
+	cd $(CASE2_RUST_DIR) && ./target/release/producer --rate $(RATE) --iterations 1 && \
+	wait
+	cd $(CASE2_PY_DIR) && python3 spark_training_parquet.py
+
+	@echo "\n>>> [SCALE 5x] ~22,120 Records <<<"
+	rm -rf $(PARQUET_OUT_DIR)/*
+	cd $(CASE2_RUST_DIR) && ./target/release/consumer --idle-timeout $(IDLE_TIMEOUT) & \
+	sleep 2 && \
+	cd $(CASE2_RUST_DIR) && ./target/release/producer --rate $(RATE) --iterations 5 && \
+	wait
+	cd $(CASE2_PY_DIR) && python3 spark_training_parquet.py
+
+	@echo "\n>>> [SCALE 10x] ~44,240 Records <<<"
+	rm -rf $(PARQUET_OUT_DIR)/*
+	cd $(CASE2_RUST_DIR) && ./target/release/consumer --idle-timeout $(IDLE_TIMEOUT) & \
+	sleep 2 && \
+	cd $(CASE2_RUST_DIR) && ./target/release/producer --rate $(RATE) --iterations 10 && \
+	wait
+	cd $(CASE2_PY_DIR) && python3 spark_training_parquet.py
+	
+	@echo "\n[SUCCESS] Scalability evaluation complete. Check logs/ directory."
 
 clean:
 	@echo "Cleaning up all artifacts..."

@@ -265,9 +265,6 @@ if __name__ == "__main__":
 
     save_results(results, feat_imp, args.parquet)
 
-    # ========================================================
-    # EXPORT TO TABLEAU
-    # ========================================================
     print("\n[Tableau Export] Saving prediction results to CSV...")
     os.makedirs(TABLEAU_DIR, exist_ok=True)
 

@@ -25,8 +25,8 @@ use tracing_subscriber::EnvFilter;
 struct Cli {
     #[arg(short, long, default_value_t = 100)]
     rate: u64,
-    #[arg(long)]
-    r#loop: bool,
+    #[arg(long, default_value_t = 1)]
+    iterations: usize,
     #[arg(long, default_value = "../../data/dataset_clean.csv")]
     dataset: PathBuf,
     #[arg(
@@ -76,10 +76,10 @@ async fn main() -> Result<()> {
     };
 
     let start = Instant::now();
-    let mut iter = 0usize;
     let mut next_ns = Instant::now();
 
-    'outer: loop {
+    // Menggunakan for loop berdasarkan jumlah iterasi (SCALE)
+    for iter in 0..cli.iterations {
         for (idx, rec) in records.iter().enumerate() {
             let mut rec = rec.clone();
             rec.event_id = format!("{}_{}", iter, idx);
@@ -131,10 +131,6 @@ async fn main() -> Result<()> {
                 .record(t_send.elapsed().as_micros() as u64)
                 .unwrap_or(());
         }
-        iter += 1;
-        if !cli.r#loop {
-            break 'outer;
-        }
     }
 
     let _ = producer.flush(Timeout::After(Duration::from_secs(15)));
@@ -144,9 +140,10 @@ async fn main() -> Result<()> {
 
     println!("\n=== RUST PRODUCER FINISHED ===");
     println!(
-        "Throughput: {:.2} rec/s | Sent: {}",
+        "Throughput: {:.2} rec/s | Sent: {} | Iterations: {}",
         total as f64 / elapsed,
-        total
+        total,
+        cli.iterations
     );
 
     save_result(
@@ -276,9 +273,12 @@ fn save_result(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let path = format!("../../logs/producer_rust_rate{}_{}.json", cli.rate, ts);
+    let path = format!(
+        "../../logs/producer_rust_rate{}_scale{}_{}.json",
+        cli.rate, cli.iterations, ts
+    );
     let json = serde_json::json!({
-        "impl": "rust", "target_rate": cli.rate, "total_sent": total, "total_errors": errors,
+        "impl": "rust", "target_rate": cli.rate, "scale_factor": cli.iterations, "total_sent": total, "total_errors": errors,
         "total_time_s": elapsed, "avg_rate": total as f64 / elapsed,
         "latency_us": { "p50": hist.value_at_quantile(0.50), "p99": hist.value_at_quantile(0.99) }
     });
