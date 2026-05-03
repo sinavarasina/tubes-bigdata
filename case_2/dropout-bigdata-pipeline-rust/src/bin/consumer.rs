@@ -168,6 +168,7 @@ fn records_to_dataframe(records: &[StudentRecord]) -> Result<DataFrame> {
         "financial_stability_index" => records.iter().map(|r| r.financial_stability_index()).collect::<Vec<f64>>(),
         "target" => records.iter().map(|r| r.target.clone()).collect::<Vec<String>>(),
         "label" => records.iter().map(|r| r.label().unwrap_or(-1)).collect::<Vec<i32>>(),
+        "event_ts_ms" => records.iter().map(|r| r.event_ts_ms).collect::<Vec<u64>>(),
     ).context("Failed to build Parquet DataFrame")?;
 
     Ok(df)

@@ -18,6 +18,7 @@ export RATE                    ?= 0
 export SCALE                   ?= 1
 export RANDOM_SEED             ?= 42
 export N_RUNS                  ?= 3
+export LATENCY_MEASURE         ?= 0
 export KAFKA_BOOTSTRAP_SERVERS := 127.0.0.1:9092
 
 CASE1_DIR      := $(WORKSPACE_DIR)/case_1/dropout-bigdata-pipeline
@@ -128,6 +129,9 @@ case-2-eval-scalability: prepare-data build-case2
 	cd $(CASE2_RUST_DIR) && ./target/release/producer --rate $(RATE) --iterations 10 && \
 	wait
 	cd $(CASE2_PY_DIR) && python3 spark_training_parquet.py
+	@echo "Generating Plotters Visualization..."
+	cd $(CASE2_RUST_DIR) && ./target/release/visualizer
+
 	
 	@echo "\n[SUCCESS] Scalability evaluation complete. Check logs/ directory."
 

@@ -9,6 +9,7 @@ use rdkafka::{
     util::Timeout,
 };
 use std::{
+    env,
     path::PathBuf,
     sync::{
         Arc,
@@ -16,7 +17,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::{sync::Semaphore, time::sleep};
+use tokio::{
+    sync::{Semaphore, mpsc},
+    time::sleep,
+};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -48,6 +52,8 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
 
+    let measure_latency = env::var("LATENCY_MEASURE").unwrap_or_else(|_| "0".to_string()) == "1";
+
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &cli.brokers)
         .set("message.timeout.ms", "10000")
@@ -67,8 +73,10 @@ async fn main() -> Result<()> {
 
     let sent_total = Arc::new(AtomicU64::new(0));
     let error_total = Arc::new(AtomicU64::new(0));
-    let mut lat_hist = Histogram::<u64>::new(3).unwrap();
     let semaphore = Arc::new(Semaphore::new(cli.inflight));
+
+    let (tx_lat, mut rx_lat) = mpsc::channel::<u64>(100_000);
+
     let interval_us = if cli.rate > 0 {
         Some(1_000_000 / cli.rate)
     } else {
@@ -78,7 +86,6 @@ async fn main() -> Result<()> {
     let start = Instant::now();
     let mut next_ns = Instant::now();
 
-    // Menggunakan for loop berdasarkan jumlah iterasi (SCALE)
     for iter in 0..cli.iterations {
         for (idx, rec) in records.iter().enumerate() {
             let mut rec = rec.clone();
@@ -104,10 +111,14 @@ async fn main() -> Result<()> {
             let topic = cli.topic.clone();
             let sent_c = sent_total.clone();
             let err_c = error_total.clone();
-            let t_send = Instant::now();
+
+            let t_dispatch = Instant::now();
+            let tx_lat_clone = tx_lat.clone();
 
             tokio::spawn(async move {
                 let _permit = permit;
+                let t_network = Instant::now();
+
                 match prod
                     .send(
                         FutureRecord::to(&topic)
@@ -119,6 +130,11 @@ async fn main() -> Result<()> {
                 {
                     Ok(_) => {
                         sent_c.fetch_add(1, Ordering::Relaxed);
+                        if measure_latency {
+                            let _ = tx_lat_clone
+                                .send(t_network.elapsed().as_micros() as u64)
+                                .await;
+                        }
                     }
                     Err(e) => {
                         err_c.fetch_add(1, Ordering::Relaxed);
@@ -127,13 +143,20 @@ async fn main() -> Result<()> {
                 }
             });
 
-            lat_hist
-                .record(t_send.elapsed().as_micros() as u64)
-                .unwrap_or(());
+            if !measure_latency {
+                let _ = tx_lat.send(t_dispatch.elapsed().as_micros() as u64).await;
+            }
         }
     }
 
     let _ = producer.flush(Timeout::After(Duration::from_secs(15)));
+    drop(tx_lat);
+
+    let mut lat_hist = Histogram::<u64>::new(3).unwrap();
+
+    while let Some(latency_micros) = rx_lat.recv().await {
+        lat_hist.record(latency_micros).unwrap_or(());
+    }
 
     let elapsed = start.elapsed().as_secs_f64();
     let total = sent_total.load(Ordering::Relaxed);
@@ -145,6 +168,9 @@ async fn main() -> Result<()> {
         total,
         cli.iterations
     );
+    if measure_latency {
+        println!("Note: True network RTT latency was measured. Expect lower throughput.");
+    }
 
     save_result(
         &cli,
