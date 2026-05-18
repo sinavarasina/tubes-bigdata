@@ -5,7 +5,7 @@ services:
     network_mode: "host"
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME:   2000
+      ZOOKEEPER_TICK_TIME: 2000
 
   kafka:
     image: docker.io/confluentinc/cp-kafka:7.5.0
@@ -14,18 +14,22 @@ services:
     depends_on:
       - zookeeper
     environment:
-      KAFKA_BROKER_ID:                           1
-      KAFKA_ZOOKEEPER_CONNECT:                   localhost:2181
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP:      PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS:                PLAINTEXT://localhost:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR:    1
-      KAFKA_NUM_NETWORK_THREADS:                 3
-      KAFKA_NUM_IO_THREADS:                      8
-      KAFKA_SOCKET_SEND_BUFFER_BYTES:            102400
-      KAFKA_SOCKET_RECEIVE_BUFFER_BYTES:         102400
-      KAFKA_SOCKET_REQUEST_MAX_BYTES:            104857600
-      KAFKA_LOG_FLUSH_INTERVAL_MESSAGES:         10000
-      KAFKA_LOG_FLUSH_INTERVAL_MS:               1000
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 127.0.0.1:2181
+
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:29092,PLAINTEXT_HOST://127.0.0.1:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_HOST
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_NUM_NETWORK_THREADS: 3
+      KAFKA_NUM_IO_THREADS: 8
+      KAFKA_SOCKET_SEND_BUFFER_BYTES: 102400
+      KAFKA_SOCKET_RECEIVE_BUFFER_BYTES: 102400
+      KAFKA_SOCKET_REQUEST_MAX_BYTES: 104857600
+      KAFKA_LOG_FLUSH_INTERVAL_MESSAGES: 10000
+      KAFKA_LOG_FLUSH_INTERVAL_MS: 1000
 
   dev-workspace:
     image: docker.io/sinanonym/bigdata-workspace:v1
@@ -36,17 +40,16 @@ services:
     volumes:
       - ./Makefile:/workspace/Makefile
       - ./scripts:/workspace/scripts
-      - ./logs:/workspace/logs
-      - ./case_1:/workspace/case_1
-      - ./case_2:/workspace/case_2
+      - ./src:/workspace/src
       - ./data:/workspace/data
+      - ./logs:/workspace/logs
       - ./benchmark_logs:/workspace/benchmark_logs
       - cargo-registry:/root/.cargo/registry
       - cargo-git:/root/.cargo/git
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: "localhost:9092"
+      KAFKA_BOOTSTRAP_SERVERS: "127.0.0.1:9092"
       RUST_LOG: "info"
-    command: tail -f /dev/null
+    command: sleep infinity
 
 volumes:
   cargo-registry:
