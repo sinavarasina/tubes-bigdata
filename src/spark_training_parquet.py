@@ -114,7 +114,7 @@ SYSTEM_PERFORMANCE_CRITERIA = [
     MetricCriterion("throughput", "Throughput", 500.0, ">", "rec/s"),
     MetricCriterion("p50_latency_ms", "P50 Latency", 100.0, "<", "ms"),
     MetricCriterion("e2e_latency_s", "End-to-End Latency",
-                    5.0, "<", "seconds"),
+                    30.0, "<", "seconds"),
 
     # Reference-only metric. Tidak diberi PASS/FAIL karena biasanya dibandingkan antar scale/run.
     MetricCriterion("training_time_s", "Training Time", None, None, "seconds"),

@@ -50,9 +50,9 @@ services:
       - ./src:/workspace/src
       - ./data:/workspace/data
       - ./logs:/workspace/logs
-      - ./benchmark_logs:/workspace/benchmark_logs
-      - cargo-registry:/root/.cargo/registry
-      - cargo-git:/root/.cargo/git
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - cargo-target:/workspace/src/dropout-bigdata-pipeline-rust/target
     environment:
       KAFKA_BOOTSTRAP_SERVERS: "127.0.0.1:9092"
       RUST_LOG: "info"
@@ -61,3 +61,4 @@ services:
 volumes:
   cargo-registry:
   cargo-git:
+  cargo-target:
