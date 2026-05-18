@@ -30,13 +30,20 @@ services:
       KAFKA_SOCKET_REQUEST_MAX_BYTES: 104857600
       KAFKA_LOG_FLUSH_INTERVAL_MESSAGES: 10000
       KAFKA_LOG_FLUSH_INTERVAL_MS: 1000
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server 127.0.0.1:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   dev-workspace:
     image: docker.io/sinanonym/bigdata-workspace:v1
     container_name: dev-workspace
     network_mode: "host"
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     volumes:
       - ./Makefile:/workspace/Makefile
       - ./scripts:/workspace/scripts
