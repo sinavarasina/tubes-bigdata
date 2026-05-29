@@ -246,7 +246,42 @@ Jika Kafka baru menyala dan mesin lambat, gunakan timeout lebih besar:
 make run RATE=0 SCALE=1 IDLE_TIMEOUT=10
 ```
 
-## Rust Build Cache
+## Tableau export
+
+Output dari program berupa csv, output itu perlu di buka dengan aplikasi tableau desktop dan di export menjadi format .twbx dengan cara seperti berikut,  
+
+### 1. Buka CSV di Tableau
+
+1. Buka **Tableau Desktop**.
+2. Di halaman awal, pilih **Connect → To a File → Text file**.
+3. Pilih file `.csv`.
+4. Tableau akan masuk ke tab **Data Source**.
+5. Cek apakah datanya sudah terbaca benar:
+
+   * delimiter koma/semicolon sesuai,
+   * header kolom benar,
+   * tipe data seperti number, date, string sudah tepat.
+
+### 2. Buat worksheet/dashboard
+
+1. Klik tab **Sheet 1**.
+2. Drag field ke **Rows**, **Columns**, **Marks**, atau **Filters**.
+3. Buat visualisasi sesuai kebutuhan.
+4. Kalau perlu dashboard: klik **New Dashboard**, lalu masukkan sheet yang sudah dibuat.
+
+### 3. Simpan sebagai `.twbx`
+
+1. Klik **File → Save As**.
+
+2. Pada bagian **Save as type**, pilih:
+
+   **Tableau Packaged Workbook (*.twbx)**
+
+3. Beri nama file.
+
+4. Klik **Save**.
+
+# Rust Build Cache
 
 Agar Rust tidak mengunduh dependency dan rebuild dari nol setiap kali container dibuat ulang, `docker-compose.yml` menggunakan named volume:
 
